@@ -61,10 +61,65 @@ struct Opts {
     use_all: usize,
     #[clap(long, value_parser = ["babble", "au", "eqsat"])]
     mode: String,
+
+    /// Dump parsed programs as JSON and exit (for egg-stitch compatibility)
+    #[clap(long)]
+    dump: Option<PathBuf>,
 }
 
 const BENCHMARK_PATH: &str = "harness/data/dreamcoder-benchmarks/benches";
 const DSR_PATH: &str = "harness/data/benchmark-dsrs";
+
+/// Format an Expr<DreamCoderOp> for egg-stitch: lambda -> lam, Inlined -> named atoms.
+fn format_for_stitch(
+    expr: &Expr<DreamCoderOp>,
+    inlined_names: &mut BTreeMap<String, String>,
+) -> String {
+    let node = expr.0.operation();
+    let args = expr.0.args();
+    match (node, args) {
+        (DreamCoderOp::Symbol(s), []) => format!("{s}"),
+        (DreamCoderOp::Var(i), []) => format!("${i}"),
+        (DreamCoderOp::Inlined(inner), []) => {
+            let key = format!("{}", babble::dreamcoder::expr::DcExpr::from((**inner).clone()));
+            let n = inlined_names.len();
+            inlined_names
+                .entry(key)
+                .or_insert_with(|| format!("fn_{n}"))
+                .clone()
+        }
+        (DreamCoderOp::Lambda, [body]) => {
+            format!("(lam {})", format_for_stitch(body, inlined_names))
+        }
+        (DreamCoderOp::App, [fun, arg]) => {
+            // Flatten nested applications: (((f a) b) c) -> (f a b c)
+            let mut head = fun;
+            let mut args_rev = vec![arg];
+            while let (DreamCoderOp::App, [inner_fun, inner_arg]) =
+                (head.0.operation(), head.0.args())
+            {
+                args_rev.push(inner_arg);
+                head = inner_fun;
+            }
+            let mut s = format!("({}", format_for_stitch(head, inlined_names));
+            for a in args_rev.into_iter().rev() {
+                s.push(' ');
+                s.push_str(&format_for_stitch(a, inlined_names));
+            }
+            s.push(')');
+            s
+        }
+        (op, children) => {
+            let mut s = format!("({op}");
+            for c in children {
+                s.push(' ');
+                s.push_str(&format_for_stitch(c, inlined_names));
+            }
+            s.push(')');
+            s
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Benchmark<'a> {
@@ -155,6 +210,53 @@ fn main() -> anyhow::Result<()> {
     println!("domains:");
     for (domain, benchmarks) in &domains {
         println!("  {domain}: {} benchmark(s)", benchmarks.len());
+    }
+
+    if let Some(dump_dir) = &opts.dump {
+        let target_domains: Vec<_> = if let Some(domain) = &opts.domain {
+            vec![(domain.as_str(), domains[domain.as_str()].as_slice())]
+        } else {
+            domains.iter().map(|(d, bs)| (*d, bs.as_slice())).collect()
+        };
+
+        let mut inlined_names = BTreeMap::new();
+        for (domain, benchmarks) in target_domains {
+            let domain_dir = dump_dir.join(domain);
+            fs::create_dir_all(&domain_dir).unwrap();
+
+            for benchmark in benchmarks {
+                let mut inputs = Vec::new();
+                for entry in fs::read_dir(benchmark.path).unwrap() {
+                    let path = entry.unwrap().path();
+                    if fs::metadata(&path).unwrap().is_file() {
+                        inputs.push(path);
+                    }
+                }
+                inputs.sort();
+
+                for input_path in &inputs {
+                    let file = input_path.file_name().unwrap().to_str().unwrap();
+                    let raw = fs::read_to_string(input_path).unwrap();
+                    let input: CompressionInput = serde_json::from_str(&raw).unwrap();
+
+                    let mut programs = Vec::new();
+                    for frontier in &input.frontiers {
+                        for p in &frontier.programs {
+                            let expr: Expr<DreamCoderOp> = p.program.clone().into();
+                            programs.push(format_for_stitch(&expr, &mut inlined_names));
+                        }
+                    }
+
+                    let out_name = format!("{}__{}", benchmark.name, file);
+                    let out_path = domain_dir.join(&out_name);
+                    let json = serde_json::to_string_pretty(&programs).unwrap();
+                    fs::write(&out_path, json).unwrap();
+                    println!("{}: {} programs", out_path.display(), programs.len());
+                }
+            }
+        }
+
+        return Ok(());
     }
 
     if let Some(domain) = &opts.domain {
