@@ -170,9 +170,8 @@ impl FromStr for DreamCoderOp {
             "apply" | "@" => Self::App,
             "lambda" | "λ" => Self::Lambda,
             input => input
-                .parse()
-                .map(Self::Var)
-                .or_else(|_| input.parse().map(Self::Var))
+                .parse::<DeBruijnIndex>()
+                .map(|DeBruijnIndex(i)| Self::Var(i))
                 .or_else(|_| input.parse().map(Self::LibVar))
                 .or_else(|_| {
                     input
@@ -360,5 +359,28 @@ mod tests {
 
         assert_eq!(parsed, expr);
         assert_eq!(expr.to_string(), input);
+    }
+
+    #[test]
+    fn op_from_str_numeric_is_symbol() {
+        // Bare numeric strings should be Symbol, not Var. Var requires `$N`.
+        assert_eq!("0".parse::<DreamCoderOp>().unwrap(), DreamCoderOp::Symbol("0".into()));
+        assert_eq!("1".parse::<DreamCoderOp>().unwrap(), DreamCoderOp::Symbol("1".into()));
+        assert_eq!("0.".parse::<DreamCoderOp>().unwrap(), DreamCoderOp::Symbol("0.".into()));
+        assert_eq!("1.".parse::<DreamCoderOp>().unwrap(), DreamCoderOp::Symbol("1.".into()));
+        assert_eq!("$0".parse::<DreamCoderOp>().unwrap(), DreamCoderOp::Var(0));
+        assert_eq!("$7".parse::<DreamCoderOp>().unwrap(), DreamCoderOp::Var(7));
+    }
+
+    #[test]
+    fn numeric_symbol_roundtrip() {
+        // Display+FromStr roundtrip through DreamCoderOp must preserve "0" as a symbol.
+        for s in ["0", "1", "0.", "1.", "42"] {
+            let op = DreamCoderOp::Symbol(s.into());
+            let printed = op.to_string();
+            assert_eq!(printed, s);
+            let reparsed: DreamCoderOp = printed.parse().unwrap();
+            assert_eq!(reparsed, op, "roundtrip failed for {s:?}");
+        }
     }
 }
