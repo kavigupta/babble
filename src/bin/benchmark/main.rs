@@ -13,13 +13,15 @@
 #![allow(clippy::non_ascii_literal)]
 
 use babble::{
-    ast_node::Expr,
+    ast_node::{AstNode, Expr},
     dreamcoder::{expr::DreamCoderOp, json::CompressionInput},
-    experiments::{cache::Cache, BeamExperiment, EqsatExperiment, Experiment, Rounds, Summary},
+    experiments::{cache::Cache, plumbing, BeamExperiment, EqsatExperiment, Experiment, Rounds, Summary},
     rewrites, util,
 };
 use clap::Parser;
+use egg::RecExpr;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs,
@@ -65,6 +67,12 @@ struct Opts {
     /// Dump parsed programs as JSON and exit (for egg-stitch compatibility)
     #[clap(long)]
     dump: Option<PathBuf>,
+
+    /// After running, dump original/rewritten programs and learned abstractions
+    /// as JSON to this path. Requires `--domain` so a single domain's results
+    /// land in one file.
+    #[clap(long)]
+    dump_json: Option<PathBuf>,
 }
 
 const BENCHMARK_PATH: &str = "harness/data/dreamcoder-benchmarks/benches";
@@ -262,6 +270,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(domain) = &opts.domain {
         run_domain(domain, &opts, &domains[domain.as_str()], &cache);
     } else {
+        assert!(
+            opts.dump_json.is_none(),
+            "--dump-json requires --domain so a single run lands in one file"
+        );
         for (domain, benchmarks) in domains {
             run_domain(domain, &opts, &benchmarks, &cache);
         }
@@ -375,6 +387,70 @@ fn run_domain(
 
     let results = results.into_inner().unwrap();
     plot_raw_data(&results, opts).unwrap();
+
+    if let Some(json_path) = &opts.dump_json {
+        write_json_dump(&results, json_path);
+    }
+}
+
+/// Dumps per-file original/rewritten programs and learned abstractions as JSON.
+/// Programs are formatted via `format_for_stitch` so identifiers match what the
+/// `--dump` mode emits, keeping downstream consumers (e.g. `egg-stitch`'s
+/// `run_babble`) on a single naming convention.
+fn write_json_dump(results: &[BenchResults], json_path: &Path) {
+    let mut inlined_names: BTreeMap<String, String> = BTreeMap::new();
+    let mut files = Vec::new();
+    for r in results {
+        let summary = &r.summary;
+        let final_recexpr: RecExpr<AstNode<DreamCoderOp>> = summary.final_expr.clone().into();
+        let libs_map = plumbing::libs(final_recexpr.as_ref());
+        let rewritten_exprs = plumbing::exprs(final_recexpr.as_ref());
+
+        // Flatten initial_expr_groups: with --use-all=0 each group is a single
+        // program; with --use-all>0 every program in the frontier is included.
+        let original: Vec<String> = summary
+            .initial_expr_groups
+            .iter()
+            .flat_map(|group| group.iter())
+            .map(|e| format_for_stitch(e, &mut inlined_names))
+            .collect();
+
+        let rewritten: Vec<String> = rewritten_exprs
+            .iter()
+            .map(|e| format_for_stitch(e, &mut inlined_names))
+            .collect();
+
+        let mut sorted_libs: Vec<_> = libs_map.into_iter().collect();
+        sorted_libs.sort_by_key(|(id, _)| id.0);
+        let abstractions: Vec<_> = sorted_libs
+            .into_iter()
+            .map(|(id, body_nodes)| {
+                let r: RecExpr<AstNode<DreamCoderOp>> = body_nodes.into();
+                let body_expr: Expr<DreamCoderOp> = r.into();
+                json!({
+                    "id": id.0,
+                    "body": format_for_stitch(&body_expr, &mut inlined_names),
+                })
+            })
+            .collect();
+
+        files.push(json!({
+            "domain": r.domain,
+            "benchmark": r.benchmark,
+            "file": r.file,
+            "elapsed_secs": summary.run_time.as_secs_f64(),
+            "initial_cost": summary.initial_cost,
+            "final_cost": summary.final_cost,
+            "num_libs": summary.num_libs,
+            "original": original,
+            "rewritten": rewritten,
+            "abstractions": abstractions,
+        }));
+    }
+    let dump = json!({ "files": files });
+    fs::write(json_path, serde_json::to_string_pretty(&dump).unwrap())
+        .expect("Failed to write JSON dump");
+    println!("wrote JSON dump to {}", json_path.display());
 }
 
 #[allow(clippy::cast_precision_loss)]
