@@ -14,20 +14,23 @@
 
 use crate::lang::Drawing;
 use babble::{
-    ast_node::{combine_exprs, Expr, Pretty},
-    experiments::{plumbing, Experiments},
+    ast_node::{combine_exprs, AstNode, Expr, Pretty},
+    experiments::{plumbing, BeamExperiment, Experiment, Experiments, Rounds},
+    extract::beam::PartialLibCost,
     learn::LibId,
-    rewrites,
+    rewrites, util,
     sexp::Program,
     teachable::BindingExpr,
 };
 use clap::Parser;
-use egg::{AstSize, CostFunction, RecExpr};
+use egg::{AstSize, CostFunction, RecExpr, Rewrite};
+use serde_json::json;
 use std::{
     convert::TryInto,
     fs,
     io::{self, Read},
     path::PathBuf,
+    time::Instant,
 };
 
 mod eval;
@@ -92,6 +95,11 @@ struct Opts {
     /// The number of programs to use
     #[clap(long)]
     limit: Option<usize>,
+
+    /// Dump original/rewritten programs and learned abstractions as JSON to this path
+    /// after running. Requires single-element `--beams` and `--lps`, and no `--test_file`.
+    #[clap(long)]
+    dump_json: Option<PathBuf>,
 }
 
 fn find_apps(exprs: Vec<Expr<Drawing>>, lib: Option<LibId>) -> Vec<Expr<Drawing>> {
@@ -166,6 +174,7 @@ fn main() {
 
     let input = opts
         .file
+        .clone()
         .map_or_else(
             || {
                 let mut buf = String::new();
@@ -235,7 +244,7 @@ fn main() {
         }
 
         // If dsr file is specified, read it:
-        let dsrs = if let Some(dsr_path) = opts.dsr {
+        let dsrs = if let Some(dsr_path) = opts.dsr.clone() {
             match rewrites::from_file(dsr_path) {
                 Ok(dsrs) => dsrs,
                 Err(e) => {
@@ -247,21 +256,139 @@ fn main() {
             vec![]
         };
 
-        let exps = Experiments::gen(
-            prog,
-            &test_prog.unwrap_or_default(),
-            &dsrs,
-            opts.beams.clone(),
-            &opts.lps,
-            opts.rounds,
-            (),
-            opts.learn_constants,
-            opts.max_arity,
-        );
+        if let Some(json_path) = opts.dump_json.clone() {
+            run_with_json_dump(prog, dsrs, &opts, &json_path);
+        } else {
+            let exps = Experiments::gen(
+                prog,
+                &test_prog.unwrap_or_default(),
+                &dsrs,
+                opts.beams.clone(),
+                &opts.lps,
+                opts.rounds,
+                (),
+                opts.learn_constants,
+                opts.max_arity,
+            );
 
-        println!("running...");
-        exps.run(&opts.output);
+            println!("running...");
+            exps.run(&opts.output);
+        }
     }
+}
+
+/// Runs a single beam-search experiment configuration end-to-end, writes the
+/// CSV row that `Experiments::run` would have written, and additionally dumps
+/// the original / rewritten programs and learned abstractions as JSON for
+/// downstream consumers (e.g. `egg-stitch`'s `run_babble` wrapper).
+fn run_with_json_dump(
+    prog: Vec<Expr<Drawing>>,
+    dsrs: Vec<Rewrite<AstNode<Drawing>, PartialLibCost>>,
+    opts: &Opts,
+    json_path: &PathBuf,
+) {
+    // `--beams`/`--lps` accept multiple values to sweep configurations in one
+    // invocation (one CSV row per (beam_width, lps) pair). The JSON dump holds
+    // a single experiment's result, so we reject sweeps. We mean a single
+    // *value* in the list (e.g. `--beams=400`), not the value `1`.
+    assert_eq!(
+        opts.beams.len(),
+        1,
+        "--dump-json requires a single --beams value (e.g. --beams=400), not a sweep like --beams=400,800; got {} values: {:?}",
+        opts.beams.len(),
+        opts.beams
+    );
+    assert_eq!(
+        opts.lps.len(),
+        1,
+        "--dump-json requires a single --lps value (e.g. --lps=1), not a sweep like --lps=1,2; got {} values: {:?}",
+        opts.lps.len(),
+        opts.lps
+    );
+    assert!(
+        opts.test_file.is_none(),
+        "--dump-json with a test file is not supported"
+    );
+
+    let beam = opts.beams[0];
+    let lps = opts.lps[0];
+
+    let beam_exp = BeamExperiment::new(
+        dsrs,
+        beam,
+        beam,
+        lps,
+        (),
+        opts.learn_constants,
+        opts.max_arity,
+        1,
+    );
+    let rounds_exp = Rounds::new(opts.rounds, beam_exp);
+
+    let csv_file = fs::File::create(&opts.output).expect("Failed to create CSV output");
+    let boxed: Box<dyn io::Write> = Box::new(csv_file);
+    let mut writer: babble::experiments::CsvWriter = csv::Writer::from_writer(boxed);
+
+    // `Experiments::run_csv` adds 1 to account for the implicit list root; mirror that.
+    let initial_cost = prog.iter().map(Expr::len).sum::<usize>() + 1;
+    let start = Instant::now();
+    let result = rounds_exp.run(prog.clone(), &mut writer);
+    let elapsed = start.elapsed();
+    let final_cost = result.final_expr.len();
+    let compression = util::compression_factor(initial_cost, final_cost);
+
+    // Match the trailing CSV row that the default `run_csv` would write.
+    rounds_exp.write_to_csv(
+        &mut writer,
+        rounds_exp.total_rounds(),
+        initial_cost,
+        final_cost,
+        compression,
+        result.num_libs,
+        elapsed,
+    );
+
+    let final_recexpr: RecExpr<AstNode<Drawing>> = result.final_expr.clone().into();
+    let libs_map = plumbing::libs(final_recexpr.as_ref());
+    let rewritten_exprs = plumbing::exprs(final_recexpr.as_ref());
+
+    let original: Vec<String> = prog
+        .iter()
+        .map(|e| {
+            let r: RecExpr<AstNode<Drawing>> = e.clone().into();
+            r.to_string()
+        })
+        .collect();
+    let rewritten: Vec<String> = rewritten_exprs
+        .into_iter()
+        .map(|e| {
+            let r: RecExpr<AstNode<Drawing>> = e.into();
+            r.to_string()
+        })
+        .collect();
+
+    let mut sorted_libs: Vec<_> = libs_map.into_iter().collect();
+    sorted_libs.sort_by_key(|(id, _)| id.0);
+    let abstractions: Vec<_> = sorted_libs
+        .into_iter()
+        .map(|(id, body_nodes)| {
+            let r: RecExpr<AstNode<Drawing>> = body_nodes.into();
+            json!({ "id": id.0, "body": r.to_string() })
+        })
+        .collect();
+
+    let dump = json!({
+        "elapsed_secs": elapsed.as_secs_f64(),
+        "rounds": opts.rounds,
+        "initial_cost": initial_cost,
+        "final_cost": final_cost,
+        "original": original,
+        "rewritten": rewritten,
+        "abstractions": abstractions,
+    });
+    fs::write(json_path, serde_json::to_string_pretty(&dump).unwrap())
+        .expect("Failed to write JSON dump");
+    println!("wrote JSON dump to {}", json_path.display());
 }
 
 fn print_svg(selection: &[usize], mut prog: Vec<Expr<Drawing>>) {
