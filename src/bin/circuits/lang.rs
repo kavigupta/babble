@@ -74,10 +74,9 @@ impl Arity for Circuit {
         }
     }
 
-    /// Inputs are lifted into abstraction parameters rather than baked in: a
-    /// cone's `$N` names one specific circuit input, so an abstraction
-    /// containing one isn't a reusable gate macro. This matches the free-variable
-    /// ban egg-stitch's `op-children-db` applies, so the two are comparable.
+    /// Inputs are generalized into abstraction parameters rather than baked in,
+    /// matching the free-variable ban egg-stitch's `op-children-db` applies, so
+    /// the two tools learn under the same constraint.
     fn allowed_in_body(&self) -> bool {
         !matches!(self, Self::Input(_))
     }

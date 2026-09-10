@@ -1,6 +1,6 @@
 use crate::teachable::BindingExpr;
 
-use super::{super::teachable::Teachable, Arity, AstNode, Expr};
+use super::{super::teachable::Teachable, AstNode, Expr};
 use egg::{ENodeOrVar, Id, Language, Pattern, RecExpr, Var};
 use std::{
     collections::HashSet,
@@ -140,22 +140,6 @@ impl<Op, T> PartialExpr<Op, T> {
     #[must_use]
     pub fn is_hole(&self) -> bool {
         matches!(self, Self::Hole(_))
-    }
-
-    /// Whether every operation here may appear in a learned abstraction's body
-    /// (see [`Arity::allowed_in_body`]). Holes are always fine — they are the
-    /// parameters a banned operation has to be lifted into.
-    #[must_use]
-    pub fn allowed_in_body(&self) -> bool
-    where
-        Op: Arity,
-    {
-        match self {
-            PartialExpr::Node(node) => {
-                node.operation().allowed_in_body() && node.iter().all(Self::allowed_in_body)
-            }
-            PartialExpr::Hole(_) => true,
-        }
     }
 
     /// Unwraps the [`Node`](Self::Node) `self` to produce the underlying

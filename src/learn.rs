@@ -265,7 +265,13 @@ where
             for ((op1, op2), inputs) in rules {
                 if op1 == op2 {
                     same = true;
-                    if inputs.is_empty() {
+                    if !op1.allowed_in_body() {
+                        // Banned from abstraction bodies, so the only way this
+                        // op can appear is as a parameter. Nothing else inserts
+                        // a hole for a state whose two sides agree, so matching
+                        // on the concrete node here would bake it in.
+                        aus.insert(PartialExpr::Hole(state));
+                    } else if inputs.is_empty() {
                         aus.insert(AstNode::leaf(op1.clone()).into());
                     } else {
                         // Recursively enumerate the inputs to this rule.
@@ -316,12 +322,6 @@ where
             let nontrivial_aus = aus
                 .iter()
                 .filter(|au| learn_constants || au.has_holes())
-                // Drop any AU that bakes in an operation the language bans from
-                // abstraction bodies. The generalized variant (that operation
-                // lifted into a hole) is enumerated alongside it, so this
-                // selects that one rather than losing the abstraction — unless
-                // lifting would push it past `max_arity`, which prunes above.
-                .filter(|au| au.allowed_in_body())
                 .cloned()
                 .map(normalize)
                 .filter_map(|(au, num_vars)| {

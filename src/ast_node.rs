@@ -46,10 +46,10 @@ pub trait Arity {
     }
 
     /// Whether a learned abstraction's body may contain this operation. An
-    /// operation that says `false` has to be lifted into a parameter instead,
-    /// so no abstraction bakes one in — the boolean-circuit `$N` inputs do
-    /// this, since an abstraction naming a specific input signal isn't a
-    /// reusable gate macro.
+    /// operation that says `false` is generalized into a parameter instead, so
+    /// it counts against `max_arity` like any other argument. The boolean
+    /// circuit inputs use this: an abstraction naming one specific input signal
+    /// is not a reusable gate macro.
     fn allowed_in_body(&self) -> bool {
         true
     }
