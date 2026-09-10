@@ -44,6 +44,15 @@ pub trait Arity {
     fn has_arity(&self, num_args: usize) -> bool {
         num_args >= self.min_arity() && self.max_arity().map_or(true, |max| num_args <= max)
     }
+
+    /// Whether a learned abstraction's body may contain this operation. An
+    /// operation that says `false` has to be lifted into a parameter instead,
+    /// so no abstraction bakes one in — the boolean-circuit `$N` inputs do
+    /// this, since an abstraction naming a specific input signal isn't a
+    /// reusable gate macro.
+    fn allowed_in_body(&self) -> bool {
+        true
+    }
 }
 
 /// An error indicating that an operation was applied to the wrong number of

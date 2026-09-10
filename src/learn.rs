@@ -316,6 +316,12 @@ where
             let nontrivial_aus = aus
                 .iter()
                 .filter(|au| learn_constants || au.has_holes())
+                // Drop any AU that bakes in an operation the language bans from
+                // abstraction bodies. The generalized variant (that operation
+                // lifted into a hole) is enumerated alongside it, so this
+                // selects that one rather than losing the abstraction — unless
+                // lifting would push it past `max_arity`, which prunes above.
+                .filter(|au| au.allowed_in_body())
                 .cloned()
                 .map(normalize)
                 .filter_map(|(au, num_vars)| {
