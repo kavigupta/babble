@@ -73,6 +73,13 @@ impl Arity for Circuit {
             other => Some(other.min_arity()),
         }
     }
+
+    /// Inputs are generalized into abstraction parameters rather than baked in,
+    /// matching the free-variable ban egg-stitch's `op-children-db` applies, so
+    /// the two tools learn under the same constraint.
+    fn allowed_in_body(&self) -> bool {
+        !matches!(self, Self::Input(_))
+    }
 }
 
 impl Display for Circuit {
